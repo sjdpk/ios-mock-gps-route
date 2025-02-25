@@ -5,6 +5,9 @@ import shutil
 import logging
 import requests
 import sys
+import termios
+import tty
+import select
 
 # Configure logging with colors and better formatting
 logging.basicConfig(
@@ -38,8 +41,6 @@ def get_route_from_osrm(start, end):
         # ✅ Append exact end location as the final step
         if route_list[-1] != end:
             route_list.append(end)
-
-        logging.info(f"\033[96m✅ Route fetched successfully! {len(route_list)} waypoints found.\033[0m")
         return route_list
     else:
         logging.error(f"❌ Failed to fetch route from OSRM: {response.text}")
@@ -47,7 +48,7 @@ def get_route_from_osrm(start, end):
 
 def simulate_route(route, simulator_udid="booted", delay=0.5):
     """
-    Simulates movement along a realistic route.
+    Simulates movement along a realistic route with pause/resume functionality.
 
     :param route: List of (lat, lon) waypoints
     :param simulator_udid: Identifier of the simulator
@@ -57,26 +58,73 @@ def simulate_route(route, simulator_udid="booted", delay=0.5):
         logging.error("❌ 'xcrun' command is not available. Ensure Xcode Command Line Tools are installed.")
         return
 
-    logging.info(f"Starting location simulation for \033[96m{len(route)} waypoints\033[0m.")
     print("🌍 Moving through route...")
 
-    for i, (lat, lon) in enumerate(route):
-        try:
-            command = ["xcrun", "simctl", "location", simulator_udid, "set", f"{lat},{lon}"]
-            result = subprocess.run(command, capture_output=True, text=True)
+    # Save original terminal settings
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    try:
+        tty.setcbreak(fd)  # Enter raw mode to read single key presses
+        print("\n\033[95mPress 'p' to pause, 'r' to resume...\033[0m")
 
-            if result.returncode == 0:
-                sys.stdout.write(f"\r🟢 Step {i+1}/{len(route)} → Moved to \033[92m({lat}, {lon})\033[0m ✅")
-                sys.stdout.flush()
-            else:
-                logging.error(f"\n❌ Step {i+1}/{len(route)}: Failed to set location. Error: {result.stderr.strip()}")
+        paused = False
 
-        except Exception as e:
-            logging.exception(f"\n❌ Exception occurred at step {i+1}/{len(route)}: {e}")
+        for i, (lat, lon) in enumerate(route):
+            # Check if paused before processing waypoint
+            while paused:
+                # Check for resume key
+                if select.select([sys.stdin], [], [], 0)[0]:
+                    key = sys.stdin.read(1)
+                    if key == 'r':
+                        paused = False
+                        print("\n\033[92m▶ Simulation resumed.\033[0m")
+                time.sleep(0.1)
 
-        time.sleep(delay)
+            # Send location command
+            try:
+                command = ["xcrun", "simctl", "location", simulator_udid, "set", f"{lat},{lon}"]
+                result = subprocess.run(command, capture_output=True, text=True)
 
-    print("\n\n🎉 \033[92mLocation simulation completed!\033[0m 🚀\n")
+                if result.returncode == 0:
+                    sys.stdout.write(f"\r🟢 Step {i+1}/{len(route)} → Moved to \033[92m({lat}, {lon})\033[0m ✅")
+                    sys.stdout.flush()
+                else:
+                    logging.error(f"\n❌ Step {i+1}/{len(route)}: Failed to set location. Error: {result.stderr.strip()}")
+
+            except Exception as e:
+                logging.exception(f"\n❌ Exception occurred at step {i+1}/{len(route)}: {e}")
+
+            # Handle delay with pause checks
+            start_time = time.time()
+            while (time.time() - start_time) < delay:
+                # Check for pause key
+                if select.select([sys.stdin], [], [], 0)[0]:
+                    key = sys.stdin.read(1)
+                    if key == 'p' or key == 'P':
+                        paused = True
+                        print("\n\033[93m⏸ Simulation paused. Press 'r' to resume...\033[0m")
+                        while paused:
+                            if select.select([sys.stdin], [], [], 0)[0]:
+                                key_resume = sys.stdin.read(1)
+                                if key_resume == 'r' or key_resume == 'R':
+                                    paused = False
+                                    print("\033[92m▶ Simulation resumed.\033[0m")
+                                    # Adjust remaining delay
+                                    remaining = delay - (time.time() - start_time)
+                                    if remaining > 0:
+                                        time.sleep(remaining)
+                                    break
+                            time.sleep(0.1)
+                # Sleep a small interval to prevent high CPU usage
+                time.sleep(0.05)
+    except Exception as e:
+        logging.error(f"An error occurred: {e}")
+    finally:
+        # Restore terminal settings
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+        print("\033[0m")  # Reset any text formatting
+
+    print("🎉 \033[92mLocation simulation completed!\033[0m 🚀\n")
 
 def get_input(prompt_text):
     """Helper function to get user input with styling"""
