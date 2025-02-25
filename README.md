@@ -7,6 +7,8 @@ This project allows you to simulate a realistic GPS location journey by fetching
 - Fetches a driving route between two locations using OSRM's API.
 - Simulates GPS location updates along the route on an iOS simulator.
 - Customizable delay between movements to mimic real-world driving speed.
+- Pause/Resume functionality to GPS location simulation
+- Enhance GPS simulator with route validation, travel modes, and improved controls
 
 ## Requirements:
 
