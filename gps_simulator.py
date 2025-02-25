@@ -17,145 +17,171 @@ logging.basicConfig(
 
 def is_xcrun_available():
     """Check if xcrun is available on the system."""
-    return shutil.which("xcrun") is not None
+    if shutil.which("xcrun") is None:
+        logging.error("❌ 'xcrun' command not found. Install Xcode Command Line Tools.")
+        return False
+    return True
 
-def get_route_from_osrm(start, end):
+def get_route_from_osrm(start, end, mode='driving'):
     """
-    Fetches a realistic driving route from OSRM API.
+    Fetches a realistic route from OSRM API.
+    
+    :param start: Tuple (lat, lon) of start location
+    :param end: Tuple (lat, lon) of end location
+    :param mode: Travel mode (driving, walking, cycling)
+    :return: List of (lat, lon) waypoints
+    """
+    valid_modes = ['driving', 'walking', 'cycling']
+    if mode not in valid_modes:
+        logging.warning(f"⚠️ Invalid mode {mode}, defaulting to driving")
+        mode = 'driving'
 
-    :param start: Tuple (lat, lon) of the starting location
-    :param end: Tuple (lat, lon) of the ending location
-    :return: List of (lat, lon) waypoints along the route
-    """
-    base_url = "https://router.project-osrm.org/route/v1/driving/"
+    base_url = f"https://router.project-osrm.org/route/v1/{mode}/"
     url = f"{base_url}{start[1]},{start[0]};{end[1]},{end[0]}?overview=full&geometries=geojson"
 
-    print("⏳ Fetching route from OSRM...")
-    response = requests.get(url)
-    
-    if response.status_code == 200:
-        route_data = response.json()
-        route_geometry = route_data["routes"][0]["geometry"]["coordinates"]
-        route_list = [(lat, lon) for lon, lat in route_geometry]  # Convert to (lat, lon)
-
-        # ✅ Append exact end location as the final step
-        if route_list[-1] != end:
-            route_list.append(end)
-        return route_list
-    else:
-        logging.error(f"❌ Failed to fetch route from OSRM: {response.text}")
+    try:
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        logging.error(f"❌ OSRM API Error: {str(e)}")
         return []
 
-def simulate_route(route, simulator_udid="booted", delay=0.5):
-    """
-    Simulates movement along a realistic route with pause/resume functionality.
+    route_data = response.json()
+    
+    # Error handling for OSRM response
+    if not route_data.get('routes'):
+        logging.error("❌ No route found - check locations are valid and reachable")
+        return []
+    if 'geometry' not in route_data['routes'][0]:
+        logging.error("❌ Invalid route geometry from OSRM")
+        return []
 
+    route_geometry = route_data['routes'][0]['geometry']['coordinates']
+    route_list = [(lat, lon) for lon, lat in route_geometry]  # Convert to (lat, lon)
+
+    # Ensure endpoint is included
+    if route_list[-1] != end:
+        route_list.append(end)
+        
+    return route_list
+
+def simulate_route(route, simulator_udid="booted", initial_delay=0.5):
+    """
+    Simulates movement with real-time controls.
+    
     :param route: List of (lat, lon) waypoints
-    :param simulator_udid: Identifier of the simulator
-    :param delay: Time delay between location updates
+    :param simulator_udid: Simulator identifier
+    :param initial_delay: Initial delay between points (seconds)
     """
     if not is_xcrun_available():
-        logging.error("❌ 'xcrun' command is not available. Ensure Xcode Command Line Tools are installed.")
         return
 
-    print("🌍 Moving through route...")
+    current_delay = initial_delay  # Mutable delay for speed control
+    min_delay, max_delay = 0.1, 5.0
+    paused = False
 
-    # Save original terminal settings
+    # Terminal setup
     fd = sys.stdin.fileno()
     old_settings = termios.tcgetattr(fd)
+    
     try:
-        tty.setcbreak(fd)  # Enter raw mode to read single key presses
-        print("\n\033[95mPress 'p' to pause, 'r' to resume...\033[0m")
-
-        paused = False
+        tty.setcbreak(fd)
+        print("\n\033[95mControls: [P]ause [R]esume [+]SpeedUp [-]SlowDown\033[0m")
 
         for i, (lat, lon) in enumerate(route):
-            # Check if paused before processing waypoint
+            # Pause state machine
             while paused:
-                # Check for resume key
-                if select.select([sys.stdin], [], [], 0)[0]:
-                    key = sys.stdin.read(1)
-                    if key == 'r':
-                        paused = False
-                        print("\n\033[92m▶ Simulation resumed.\033[0m")
+                if read_stdin() == 'r':
+                    paused = False
+                    print("\033[92m▶ Resumed\033[0m")
                 time.sleep(0.1)
 
-            # Send location command
+            # Execute location update
             try:
-                command = ["xcrun", "simctl", "location", simulator_udid, "set", f"{lat},{lon}"]
-                result = subprocess.run(command, capture_output=True, text=True)
-
-                if result.returncode == 0:
-                    sys.stdout.write(f"\r🟢 Step {i+1}/{len(route)} → Moved to \033[92m({lat}, {lon})\033[0m ✅")
-                    sys.stdout.flush()
-                else:
-                    logging.error(f"\n❌ Step {i+1}/{len(route)}: Failed to set location. Error: {result.stderr.strip()}")
-
+                cmd = ["xcrun", "simctl", "location", simulator_udid, "set", f"{lat},{lon}"]
+                result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+                sys.stdout.write(f"\r🟢 Step {i+1}/{len(route)} → \033[92m{lat:.5f}, {lon:.5f}\033[0m")
+                sys.stdout.flush()
+            except subprocess.CalledProcessError as e:
+                logging.error(f"\n❌ Command failed: {e.stderr.strip()}")
+                return
             except Exception as e:
-                logging.exception(f"\n❌ Exception occurred at step {i+1}/{len(route)}: {e}")
+                logging.error(f"\n❌ Unexpected error: {str(e)}")
+                return
 
-            # Handle delay with pause checks
+            # Dynamic delay handling
             start_time = time.time()
-            while (time.time() - start_time) < delay:
-                # Check for pause key
-                if select.select([sys.stdin], [], [], 0)[0]:
-                    key = sys.stdin.read(1)
-                    if key == 'p' or key == 'P':
-                        paused = True
-                        print("\n\033[93m⏸ Simulation paused. Press 'r' to resume...\033[0m")
-                        while paused:
-                            if select.select([sys.stdin], [], [], 0)[0]:
-                                key_resume = sys.stdin.read(1)
-                                if key_resume == 'r' or key_resume == 'R':
-                                    paused = False
-                                    print("\033[92m▶ Simulation resumed.\033[0m")
-                                    # Adjust remaining delay
-                                    remaining = delay - (time.time() - start_time)
-                                    if remaining > 0:
-                                        time.sleep(remaining)
-                                    break
-                            time.sleep(0.1)
-                # Sleep a small interval to prevent high CPU usage
-                time.sleep(0.05)
-    except Exception as e:
-        logging.error(f"An error occurred: {e}")
+            while (time.time() - start_time) < current_delay:
+                key = read_stdin()
+                
+                if key == 'p':
+                    paused = True
+                    print("\n\033[93m⏸ Paused\033[0m")
+                    while paused:
+                        if read_stdin() == 'r':
+                            paused = False
+                            print("\033[92m▶ Resumed\033[0m")
+                        time.sleep(0.1)
+                elif key == '+':
+                    new_delay = max(current_delay * 0.8, min_delay)
+                    if new_delay != current_delay:
+                        current_delay = new_delay
+                        print(f"\033[95m⚡ Speed increased ({current_delay:.2f}s)\033[0m")
+                elif key == '-':
+                    new_delay = min(current_delay * 1.2, max_delay)
+                    if new_delay != current_delay:
+                        current_delay = new_delay
+                        print(f"\033[95m🐢 Speed decreased ({current_delay:.2f}s)\033[0m")
+                
+                time.sleep(0.05)  # CPU throttle
+
     finally:
-        # Restore terminal settings
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-        print("\033[0m")  # Reset any text formatting
+        print("\n\033[92m✅ Simulation completed!\033[0m")
 
-    print("🎉 \033[92mLocation simulation completed!\033[0m 🚀\n")
+def read_stdin():
+    """Non-blocking stdin read."""
+    if select.select([sys.stdin], [], [], 0)[0]:
+        return sys.stdin.read(1).lower()
+    return None
 
-def get_input(prompt_text):
-    """Helper function to get user input with styling"""
-    return input(f"\033[96m{prompt_text}:\033[0m ").strip()
+def validate_coords(input_str):
+    """Validate and parse coordinate input."""
+    try:
+        lat, lon = map(float, input_str.split(','))
+        if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+            raise ValueError
+        return (lat, lon)
+    except:
+        logging.error("❌ Invalid coordinates. Use decimal format: 37.7749,-122.4194")
+        sys.exit(1)
 
 def main():
-    print("\n\033[95m🚗 GPS Location Simulation - OSRM Based Routing\033[0m")
+    print("\n\033[95m🚀 GPS Location Simulator - Enhanced Edition\033[0m")
 
-    # Ask for Start Location (comma-separated)
-    start_input = get_input("🔹 Enter Start Location (lat, lon)")
-    start_lat, start_lon = map(float, start_input.split(","))
+    # User input with validation
+    start = validate_coords(get_input("🌍 Enter START (lat,lon)"))
+    end = validate_coords(get_input("🎯 Enter DESTINATION (lat,lon)"))
+    mode = get_input("🚴 Enter MODE (driving/walking/cycling) [driving]").lower() or 'driving'
+    delay_input = get_input("⏳ Enter INITIAL DELAY (0.1-5.0) [0.5]") or "0.5"
 
-    # Ask for Destination Location (comma-separated)
-    end_input = get_input("🔹 Enter Destination Location (lat, lon)")
-    end_lat, end_lon = map(float, end_input.split(","))
+    try:
+        initial_delay = max(0.1, min(5.0, float(delay_input)))
+    except ValueError:
+        logging.error("❌ Invalid delay value. Using default 0.5s")
+        initial_delay = 0.5
 
-    # Ask for delay
-    delay_input = get_input("⏳ Enter Delay Between Movements (default: 0.5 sec)")
-    delay = float(delay_input) if delay_input else 0.5
+    # Route fetching
+    route = get_route_from_osrm(start, end, mode)
+    if not route:
+        logging.error("❌ Aborting simulation due to route errors")
+        return
 
-    start_location = (start_lat, start_lon)
-    end_location = (end_lat, end_lon)
+    simulate_route(route, initial_delay=initial_delay)
 
-    # Fetch Route
-    route = get_route_from_osrm(start_location, end_location)
-
-    if route:
-        # Simulate Route
-        simulate_route(route, delay=delay)
-    else:
-        logging.error("\n❌ No route data available. Simulation aborted.")
+def get_input(prompt_text):
+    """Styled input prompt."""
+    return input(f"\033[96m{prompt_text}:\033[0m ").strip()
 
 if __name__ == "__main__":
     main()
