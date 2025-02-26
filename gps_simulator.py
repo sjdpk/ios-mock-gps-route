@@ -55,6 +55,48 @@ def generate_dwell_points(center, num_points=6, min_radius=0.002, max_radius=0.0
         points.append((new_lat, new_lon))
     return points
 
+def get_location_name(lat, lon):
+    """
+    Get human-readable location name from coordinates using OSM Nominatim.
+    
+    :param lat: Latitude
+    :param lon: Longitude
+    :return: String with location name or coordinates if lookup fails
+    """
+    url = f"https://nominatim.openstreetmap.org/reverse?lat={lat}&lon={lon}&format=json&accept-language=en"
+    headers = {
+        "User-Agent": "GPS-Location-Simulator/1.0",  # Required by Nominatim ToS
+    }
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=5)
+        response.raise_for_status()
+        data = response.json()
+        
+        if "address" in data:
+            try:
+                # Try to create a concise address with key components
+                address_parts = []
+                address_keys = list(data["address"].keys())
+                if address_keys and address_keys[0] in data["address"]:
+                    first_component = data["address"][address_keys[0]]
+                    address_parts.append(first_component)
+                if "city" in data["address"]:
+                    address_parts.append(data["address"]["city"])
+                if "country" in data["address"]:
+                    address_parts.append(data["address"]["country"])
+                if address_parts:
+                    return " - ".join(address_parts)
+            except:
+                pass
+                
+        # Fallback to display_name or coordinates if the above fails
+        if "display_name" in data:
+            return data["display_name"]
+        return f"{lat:.5f}, {lon:.5f}"
+    except Exception as e:
+        logging.warning(f"⚠️ Could not get location name: {str(e)}")
+        return f"{lat:.5f}, {lon:.5f}"
 
 def get_route_from_osrm(start, end, mode='driving'):
     """
@@ -201,8 +243,12 @@ def main():
         print("\n\033[95m🚀 GPS Location Simulator - Enhanced Edition\033[0m")
 
         # User input with validation
-        start = validate_coords(get_input("🌍 Enter START (lat,lon)"))
-        end = validate_coords(get_input("🎯 Enter DESTINATION (lat,lon)"))
+        start_coords = get_input("🌍 Enter START (lat,lon)")
+        start = validate_coords(start_coords)
+        
+        end_coords = get_input("🎯 Enter DESTINATION (lat,lon)")
+        end = validate_coords(end_coords)
+        
         mode = get_input("🚴 Enter MODE (driving/walking/cycling) [driving]").lower() or 'driving'
         delay_input = get_input("⏳ Enter INITIAL DELAY (0.1-5.0) [0.5]") or "0.5"
 
@@ -212,11 +258,19 @@ def main():
             logging.error("❌ Invalid delay value. Using default 0.5s")
             initial_delay = 0.5
 
-        # Route fetching
+        # Only fetch location names when plotting the route
+        print("\033[96m📡 Fetching route...\033[0m")
         route = get_route_from_osrm(start, end, mode)
         if not route:
             logging.error("❌ Aborting simulation due to route errors")
             return
+
+        # Get location names after route is fetched
+        start_location = get_location_name(start[0], start[1])
+        end_location = get_location_name(end[0], end[1])
+
+        print(f"\033[92m✅ Route found with {len(route)} waypoints\033[0m")
+        print(f"\033[96m🗺️ Trip: {start_location} → {end_location}\033[0m")
 
         # Generate dwell points and track phase transition
         original_route_length = len(route)
