@@ -197,33 +197,37 @@ def validate_coords(input_str):
         sys.exit(1)
 
 def main():
-    print("\n\033[95m🚀 GPS Location Simulator - Enhanced Edition\033[0m")
-
-    # User input with validation
-    start = validate_coords(get_input("🌍 Enter START (lat,lon)"))
-    end = validate_coords(get_input("🎯 Enter DESTINATION (lat,lon)"))
-    mode = get_input("🚴 Enter MODE (driving/walking/cycling) [driving]").lower() or 'driving'
-    delay_input = get_input("⏳ Enter INITIAL DELAY (0.1-5.0) [0.5]") or "0.5"
-
     try:
-        initial_delay = max(0.1, min(5.0, float(delay_input)))
-    except ValueError:
-        logging.error("❌ Invalid delay value. Using default 0.5s")
-        initial_delay = 0.5
+        print("\n\033[95m🚀 GPS Location Simulator - Enhanced Edition\033[0m")
 
-    # Route fetching
-    route = get_route_from_osrm(start, end, mode)
-    if not route:
-        logging.error("❌ Aborting simulation due to route errors")
-        return
+        # User input with validation
+        start = validate_coords(get_input("🌍 Enter START (lat,lon)"))
+        end = validate_coords(get_input("🎯 Enter DESTINATION (lat,lon)"))
+        mode = get_input("🚴 Enter MODE (driving/walking/cycling) [driving]").lower() or 'driving'
+        delay_input = get_input("⏳ Enter INITIAL DELAY (0.1-5.0) [0.5]") or "0.5"
 
-    # Generate dwell points and track phase transition
-    original_route_length = len(route)
-    dwell_points = generate_dwell_points(end, num_points=10)
-    route += dwell_points
-    dwell_start_index = original_route_length
+        try:
+            initial_delay = max(0.1, min(5.0, float(delay_input)))
+        except ValueError:
+            logging.error("❌ Invalid delay value. Using default 0.5s")
+            initial_delay = 0.5
 
-    simulate_route(route, initial_delay=initial_delay, dwell_start_index=dwell_start_index)
+        # Route fetching
+        route = get_route_from_osrm(start, end, mode)
+        if not route:
+            logging.error("❌ Aborting simulation due to route errors")
+            return
+
+        # Generate dwell points and track phase transition
+        original_route_length = len(route)
+        dwell_points = generate_dwell_points(end, num_points=10)
+        route += dwell_points
+        dwell_start_index = original_route_length
+
+        simulate_route(route, initial_delay=initial_delay, dwell_start_index=dwell_start_index)
+    except KeyboardInterrupt:
+        print("\033[91m⛔ Simulation interrupted by user.\033[0m")
+        sys.exit(0)  # Exit gracefully with exit code 0
 
 def get_input(prompt_text):
     """Styled input prompt."""
