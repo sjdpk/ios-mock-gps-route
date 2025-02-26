@@ -8,6 +8,9 @@ import sys
 import termios
 import tty
 import select
+import math
+import random
+
 
 # Configure logging with colors and better formatting
 logging.basicConfig(
@@ -21,6 +24,37 @@ def is_xcrun_available():
         logging.error("❌ 'xcrun' command not found. Install Xcode Command Line Tools.")
         return False
     return True
+
+def generate_dwell_points(center, num_points=6, min_radius=0.002, max_radius=0.004):
+    """
+    Generates random points around a center location to simulate small movements.
+    
+    :param center: Tuple (lat, lon) of the center point
+    :param num_points: Number of dwell points to generate
+    :param min_radius: Minimum radius in meters (2 cm)
+    :param max_radius: Maximum radius in meters (4 cm)
+    :return: List of (lat, lon) points around the center
+    """
+    points = []
+    lat, lon = center
+    for _ in range(num_points):
+        # Random angle and distance within the given radius range
+        angle = random.uniform(0, 2 * math.pi)
+        distance = random.uniform(min_radius, max_radius)
+        
+        # Convert meters to degrees
+        # Latitude: 1 meter ≈ 1/111111 degrees
+        delta_lat = (distance * math.sin(angle)) / 111111.0
+        
+        # Longitude: 1 meter ≈ 1/(111111 * cos(lat)) degrees
+        delta_lon = (distance * math.cos(angle)) / (111111.0 * math.cos(math.radians(lat)))
+        
+        new_lat = lat + delta_lat
+        new_lon = lon + delta_lon
+        
+        points.append((new_lat, new_lon))
+    return points
+
 
 def get_route_from_osrm(start, end, mode='driving'):
     """
@@ -65,13 +99,14 @@ def get_route_from_osrm(start, end, mode='driving'):
         
     return route_list
 
-def simulate_route(route, simulator_udid="booted", initial_delay=0.5):
+def simulate_route(route, simulator_udid="booted", initial_delay=0.5, dwell_start_index=None):
     """
     Simulates movement with real-time controls.
     
     :param route: List of (lat, lon) waypoints
     :param simulator_udid: Simulator identifier
     :param initial_delay: Initial delay between points (seconds)
+    :param dwell_start_index: Index where dwell phase starts
     """
     if not is_xcrun_available():
         return
@@ -79,6 +114,7 @@ def simulate_route(route, simulator_udid="booted", initial_delay=0.5):
     current_delay = initial_delay  # Mutable delay for speed control
     min_delay, max_delay = 0.1, 5.0
     paused = False
+    dwell_phase_entered = False
 
     # Terminal setup
     fd = sys.stdin.fileno()
@@ -89,6 +125,10 @@ def simulate_route(route, simulator_udid="booted", initial_delay=0.5):
         print("\n\033[95mControls: [P]ause [R]esume [+]SpeedUp [-]SlowDown\033[0m")
 
         for i, (lat, lon) in enumerate(route):
+            # Check if we're entering dwell phase
+            if not dwell_phase_entered and dwell_start_index is not None and i >= dwell_start_index:
+                dwell_phase_entered = True
+                current_delay = max_delay  # Set to minimum speed
             # Pause state machine
             while paused:
                 if read_stdin() == 'r':
@@ -126,12 +166,12 @@ def simulate_route(route, simulator_udid="booted", initial_delay=0.5):
                     new_delay = max(current_delay * 0.8, min_delay)
                     if new_delay != current_delay:
                         current_delay = new_delay
-                        print(f"\033[95m⚡ Speed increased ({current_delay:.2f}s)\033[0m")
+                        print(f"\n\033[95m⚡ Speed increased ({current_delay:.2f}s)\033[0m")
                 elif key == '-':
                     new_delay = min(current_delay * 1.2, max_delay)
                     if new_delay != current_delay:
                         current_delay = new_delay
-                        print(f"\033[95m🐢 Speed decreased ({current_delay:.2f}s)\033[0m")
+                        print(f"\n\033[95m🐢 Speed decreased ({current_delay:.2f}s)\033[0m")
                 
                 time.sleep(0.05)  # CPU throttle
 
@@ -177,7 +217,13 @@ def main():
         logging.error("❌ Aborting simulation due to route errors")
         return
 
-    simulate_route(route, initial_delay=initial_delay)
+    # Generate dwell points and track phase transition
+    original_route_length = len(route)
+    dwell_points = generate_dwell_points(end, num_points=10)
+    route += dwell_points
+    dwell_start_index = original_route_length
+
+    simulate_route(route, initial_delay=initial_delay, dwell_start_index=dwell_start_index)
 
 def get_input(prompt_text):
     """Styled input prompt."""
