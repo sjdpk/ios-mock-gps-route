@@ -63,7 +63,9 @@ def main():
         
         if use_csv:
             # CSV mode - read coordinates from file
-            csv_path = get_input("Enter CSV file path")
+            # Default to sample_route.csv in data folder
+            default_csv = "data/sample_route.csv"
+            csv_path = get_input(f"Enter CSV file path [{default_csv}]") or default_csv
             route = read_route_from_csv(csv_path)
             
             if not route:
